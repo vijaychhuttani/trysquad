@@ -1,6 +1,8 @@
 var request = require('request');
 var pem = require('pem');
 var SignedXml = require('xml-crypto').SignedXml;
+var moment = require('moment-timezone');
+var xml2json = require('xml2json');
 
 module.exports = function(app){
 	
@@ -18,14 +20,16 @@ module.exports = function(app){
 		var aadharNumber = req.body.aadharNumber;
 		var aadharOTPAPIVersion = "1.6";
 		
-		readDataFromKeyStore(function(x509Certificate, x509CertificateInfo, privateKey, publicKey){
+		var timestamp = moment().tz("Asia/Kolkata").format("YYYY-MM-DDThh:mm:ss");
+		
+		readDataFromKeyStore(function(x509Certificate, x509CertificateInfo, privateKey){
 			
 			var txn = getTxn(aadharAUACode);
-			var xml = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?><Otp uid='"+aadharNumber+"' tid='"+aadharDeviceId+"' ac='"+aadharAUACode+"' sa='"+aadharSubAUACode+"' ver='"+aadharOTPAPIVersion+"' txn='"+txn+"' lk='"+aadharAUALicenseKey+"' type='A'><Opts ch='00'/></Otp>";
-			var signedXML = signXML(xml, x509Certificate, x509CertificateInfo, privateKey, publicKey);
+			var xml = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?><Otp uid='"+aadharNumber+"' tid='"+aadharDeviceId+"' ac='"+aadharAUACode+"' sa='"+aadharSubAUACode+"' ver='"+aadharOTPAPIVersion+"' txn='"+txn+"' lk='"+aadharAUALicenseKey+"' type='A' ts='"+timestamp+"'><Opts ch='00'/></Otp>";
+			var signedXML = signXML(xml, x509Certificate, x509CertificateInfo, privateKey);
 			
 			// Get the URL for Aadhar OTP
-			var aadharOTPRequestUrl = "http://developer.uidai.gov.in/otp/"+aadharOTPAPIVersion+"/"+aadharAUACode+"/"+aadharNumber.charAt(0)+"/"+aadharNumber.charAt(1)+"/"+encodeURI(aadharASALicenseKey);
+			var aadharOTPRequestUrl = "http://developer.uidai.gov.in/otp/"+aadharOTPAPIVersion+"/"+aadharAUACode+"/"+aadharNumber.charAt(0)+"/"+aadharNumber.charAt(1)+"/"+encodeURI(aadharASALicenseKey);		
 			var options = {
 				url: aadharOTPRequestUrl,
 				method: 'POST',
@@ -36,10 +40,7 @@ module.exports = function(app){
 			}
 
 			request(options, function (error, response, body) {
-				res.set('Content-Type', 'text/xml');
-
-				// Temporarily send request params as well. Ideally in production, we only want to send status code back
-				res.send("<Result><Request><Url>"+aadharOTPRequestUrl+"</Url><Body>"+signedXML+"</Body></Request><Response><Body>"+body+"</Body><Error>"+error+"</Error></Response></Result>");
+				res.send(xml2json.toJson(body));
 			});
 		});
 	});
@@ -58,7 +59,7 @@ module.exports = function(app){
 		var moment = require('moment-timezone');
 		return "TrySquadServer:"+aadharAUACode+":"+moment().tz("Asia/Kolkata").format("YYYYMMDDThhmmss");
 	}
-	function signXML(xml, x509Certificate, x509CertificateInfo, privateKey, publicKey){
+	function signXML(xml, x509Certificate, x509CertificateInfo, privateKey){
 	
 		var sig = new SignedXml();
 		sig.addReference(
@@ -77,20 +78,23 @@ module.exports = function(app){
 			true
 		);
 		sig.signingKey = privateKey;
-		sig.keyInfoProvider = new XmlSigningKeyInfoProvider(x509Certificate, x509CertificateInfo, publicKey);
+		sig.keyInfoProvider = new XmlSigningKeyInfoProvider(x509Certificate, x509CertificateInfo);
 		sig.computeSignature(xml);
 		return sig.getSignedXml();
 	}
-	function XmlSigningKeyInfoProvider(x509Certificate, x509CertificateInfo, publicKey) {
+	function XmlSigningKeyInfoProvider(x509Certificate, x509CertificateInfo) {
 		this.x509Certificate = x509Certificate;
 		this.x509CertificateInfo = x509CertificateInfo;
-		this.publicKey = publicKey;
 
 		this.getKeyInfo = function(key, prefix) {
+			
+			var certBegin = "-----BEGIN CERTIFICATE-----";
+			var certEnd = "-----END CERTIFICATE-----";
+			
 			prefix = prefix || '';
 			prefix = prefix ? prefix + ':' : prefix;
 			var subject="CN="+this.x509CertificateInfo.commonName+",O="+this.x509CertificateInfo.organization+",ST="+this.x509CertificateInfo.state+",C="+this.x509CertificateInfo.country;
-			var keyInfo = "<"+prefix+"X509SubjectName>"+subject+"</"+prefix+"X509SubjectName><"+prefix+"X509Certificate>"+this.publicKey+"</"+prefix+"X509Certificate>";
+			var keyInfo = "<"+prefix+"X509SubjectName>"+subject+"</"+prefix+"X509SubjectName><"+prefix+"X509Certificate>"+this.x509Certificate.replace(certBegin,'').replace(certEnd,'')+"</"+prefix+"X509Certificate>";
 			return "<" + prefix + "X509Data>"+keyInfo+"</" + prefix + "X509Data>";
 		}
 
@@ -105,22 +109,13 @@ module.exports = function(app){
 	
 		var pem = require('pem');
 		pem.readPkcs12(keyStoreFilePath, {p12Password:keyStorePassword}, function(err, data){
+			
 			var x509Certificate = data.cert;
 			var privateKey = data.key;
 	
 			// Ready certificate info from certificate
 			pem.readCertificateInfo(x509Certificate, function(err, x509CertificateInfo){
-		
-				// Read public key from certificate
-				pem.getPublicKey(x509Certificate, function(err, pk){
-				
-					var publicKey = pk.publicKey;
-					var certBegin = "-----BEGIN PUBLIC KEY-----\n";
-					var certEnd = "\n-----END PUBLIC KEY-----";
-					publicKey = publicKey.replace(certBegin,'').replace(certEnd,'');
-				
-					cb(x509Certificate, x509CertificateInfo, privateKey, publicKey);
-				});
+				cb(x509Certificate, x509CertificateInfo, privateKey);
 			});	
 		});
 	}
